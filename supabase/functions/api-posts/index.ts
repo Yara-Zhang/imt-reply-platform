@@ -57,16 +57,16 @@ Deno.serve(async (req) => {
     if (p.get("demand_id")) {
       q = p.get("demand_id") === "none" ? q.is("demand_id", null) : q.eq("demand_id", p.get("demand_id")!);
     }
-    if (p.get("stale")) q = q.eq("stale", p.get("stale") === "1");
-    else q = q.eq("stale", false);
+    if (p.get("stale")) q = q.eq("stale", p.get("stale") === "1"); // 默认不过滤, 显式传参才筛
     if (p.get("review") === "1") q = q.eq("state", "claimed").not("reply_draft", "is", null).is("ja_reviewed_at", null).in("market", ["jp", "kr"]);
     if (p.get("q")) q = q.or(`summary.ilike.%${p.get("q")}%,content.ilike.%${p.get("q")}%,quote.ilike.%${p.get("q")}%`);
-    const days = Number(p.get("days") ?? 3);
+    const days = Number(p.get("days") ?? 0);
     if (days > 0) q = q.gte("published_at", new Date(Date.now() - days * 86400000).toISOString());
     const sort = p.get("sort") ?? "score";
     q = sort === "time" ? q.order("published_at", { ascending: false }) : sort === "eng" ? q.order("metrics_json->>likes", { ascending: false }) : q.order("priority_score", { ascending: false });
     const page = Number(p.get("page") ?? 1);
-    const { data, error } = await q.range((page - 1) * 40, page * 40 - 1);
+    const pageSize = Math.min(200, Math.max(1, Number(p.get("page_size") ?? 40)));
+    const { data, error } = await q.range((page - 1) * pageSize, page * pageSize - 1);
     if (error) return json({ error: error.message }, 500);
     return json({ posts: data });
   }
@@ -75,15 +75,26 @@ Deno.serve(async (req) => {
   if (req.method === "GET" && path === "stats") {
     const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
     const weekStart = new Date(); weekStart.setHours(0, 0, 0, 0); weekStart.setDate(weekStart.getDate() - 7);
-    const open = await client.from("demand_posts").select("id", { count: "exact", head: true }).eq("state", "open").eq("stale", false);
+    const open = await client.from("demand_posts").select("id", { count: "exact", head: true }).eq("state", "open");
     const todayNew = await client.from("demand_posts").select("id", { count: "exact", head: true }).gte("created_at", todayStart.toISOString());
     const mine = await client.from("demand_posts").select("id", { count: "exact", head: true }).eq("claimed_by", member.id).eq("state", "claimed");
     const review = await client.from("demand_posts").select("id", { count: "exact", head: true }).eq("state", "claimed").not("reply_draft", "is", null).is("ja_reviewed_at", null).in("market", ["jp", "kr"]);
     const todayReplied = await client.from("demand_posts").select("id", { count: "exact", head: true }).eq("replied_by", member.id).gte("replied_at", todayStart.toISOString());
     const weekReplied = await client.from("demand_posts").select("id", { count: "exact", head: true }).eq("replied_by", member.id).gte("replied_at", weekStart.toISOString());
+    // 优先级积压: 未完成(open+claimed)帖按市场×档位计数; 回复完成/跳过后自动退出 → 条数递减
+    const { data: priRows } = await client.from("demand_posts")
+      .select("market, priority_score")
+      .in("state", ["open", "claimed"]);
+    const priority: Record<string, { p0: number; p1: number; p2: number }> = { cn: { p0: 0, p1: 0, p2: 0 }, en: { p0: 0, p1: 0, p2: 0 }, jp: { p0: 0, p1: 0, p2: 0 }, kr: { p0: 0, p1: 0, p2: 0 } };
+    for (const r of priRows ?? []) {
+      const s = r.priority_score ?? 0;
+      const tier = s >= 70 ? "p0" : s >= 40 ? "p1" : "p2";
+      (priority[r.market] ??= { p0: 0, p1: 0, p2: 0 })[tier]++;
+    }
     return json({
       open: open.count ?? 0, today_new: todayNew.count ?? 0, mine: mine.count ?? 0,
       review: review.count ?? 0, today_replied: todayReplied.count ?? 0, week_replied: weekReplied.count ?? 0,
+      priority,
     });
   }
 
@@ -239,7 +250,7 @@ Deno.serve(async (req) => {
         return json({ post: updated?.[0] });
       }
 
-      // 保存草稿: 重新品牌检查; 有改动清空母语审核 (v2 规则)
+      // 保存草稿: 重新品牌检查; 有改动清空母语审核 (v2 规则); 支持一并保存中文对照
       case "draft": {
         const draft = (body.ddraft ?? body.draft) as string;
         const patch: Record<string, unknown> = {
@@ -247,6 +258,7 @@ Deno.serve(async (req) => {
           draft_at: new Date().toISOString(),
           brand_issues: await brandIssuesFor(draft ?? ""),
         };
+        if (typeof body.reply_draft_cn === "string") patch.reply_draft_cn = body.reply_draft_cn.slice(0, 4000);
         if (draft !== post.reply_draft) {
           patch.ja_reviewed_by = null;
           patch.ja_reviewed_at = null;
@@ -268,18 +280,34 @@ Deno.serve(async (req) => {
         return json({ post: updated });
       }
 
-      // 标记已回复 (拦截规则全接入)
+      // 标记已回复 (拦截规则全接入; 回复链接必填)
       case "replied": {
+        const replyUrl = (body.reply_url as string | undefined)?.trim();
+        if (!replyUrl || !/^https?:\/\//.test(replyUrl)) {
+          return json({ error: "请登记回复链接（粘贴你发出的回复的 URL）" }, 400);
+        }
         const issues = (post.brand_issues ?? []) as BrandIssue[];
         const block = checkMarkReplied({ ...post, brand_issues: issues }, await currentReviewerName(post.market));
         if (block.blocked) return json({ error: block.message }, 400);
         const patch: Record<string, unknown> = {
           state: "replied", replied_by: member.id, replied_at: new Date().toISOString(),
-          reply_url: body.reply_url ?? null, reply_account: body.reply_account ?? null,
+          reply_url: replyUrl, reply_account: body.reply_account ?? null,
           metrics_before: post.metrics_json ?? {},
         };
         if (!post.claimed_by) patch.claimed_by = member.id;
         const { data: updated } = await client.from("demand_posts").update(patch).eq("id", id).select("*").single();
+        return json({ post: updated });
+      }
+
+      // 修改/补填回复链接 (仅已回复帖)
+      case "reply-url": {
+        const replyUrl = (body.reply_url as string | undefined)?.trim();
+        if (!replyUrl || !/^https?:\/\//.test(replyUrl)) {
+          return json({ error: "回复链接格式不对（需要 http(s):// 开头）" }, 400);
+        }
+        if (post.state !== "replied") return json({ error: "只有已回复的帖子才能修改回复链接" }, 400);
+        await client.from("op_log").insert({ table_name: "demand_posts", row_id: id, action: "reply_url_update", operator: member.id, detail: { prev: post.reply_url, next: replyUrl } });
+        const { data: updated } = await client.from("demand_posts").update({ reply_url: replyUrl }).eq("id", id).select("*").single();
         return json({ post: updated });
       }
 

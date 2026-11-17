@@ -8,17 +8,18 @@ const router = useRouter();
 const auth = useAuth();
 
 const posts = ref([]);
-const stats = reactive({ open: 0, today_new: 0, mine: 0, review: 0, today_replied: 0, week_replied: 0 });
+const stats = reactive({ open: 0, today_new: 0, mine: 0, review: 0, today_replied: 0, week_replied: 0, priority: {} });
 const health = ref(null);
-const F = reactive({ mkt: "all", tab: "open", plat: "全部", scene: "全部", q: "", sort: "score", days: 3 });
+const F = reactive({ mkt: "all", tab: "open", plat: "全部", scene: "全部", q: "", sort: "score", days: 0, pri: "全部" });
 const selId = ref(null);
 const draft = ref("");
 const toast = reactive({ show: false, msg: "", err: false });
 const skipModal = ref(false);
 const kbdModal = ref(false);
+const replyUrlModal = ref(false);
+const replyUrl = ref("");
 const showGuide = ref(!localStorage.getItem("imt_guide_done"));
 const guideStep = ref(0);
-const staleOpen = ref(false);
 
 // 建联卡片状态 (spec C2: 点徽章 → 右侧栏切换)
 const outreach = ref(null); // 建联卡数据; null = 显示帖子详情
@@ -55,18 +56,29 @@ function t(msg, err = false) {
 
 async function load() {
   try {
-    const [list, st, h] = await Promise.all([
-      api(`/posts/list`, { method: "GET" }),
+    // 循环翻页拉全量 (v4: 默认展示全部帖子, page_size 上限 200)
+    const allPosts = [];
+    for (let page = 1; page <= 20; page++) {
+      const list = await api(`/posts/list?page=${page}&page_size=200`, { method: "GET" });
+      const arr = list.posts ?? [];
+      allPosts.push(...arr);
+      if (arr.length < 200) break;
+    }
+    const [st, h] = await Promise.all([
       api(`/stats`, { method: "GET" }),
       api(`/health`, { method: "GET" }),
     ]);
-    posts.value = list.posts ?? [];
+    posts.value = allPosts;
     Object.assign(stats, st);
     health.value = h;
-    if (list.posts?.length && !selId.value) selId.value = list.posts[0].id;
+    if (allPosts.length && !selId.value) selId.value = allPosts[0].id;
     const sel = posts.value.find((p) => p.id === selId.value);
     if (sel) draft.value = sel.reply_draft ?? "";
   } catch (e) { t(e.message, true); }
+}
+
+async function refreshStats() {
+  try { Object.assign(stats, await api(`/stats`, { method: "GET" })); } catch { /* 忽略 */ }
 }
 
 // ---------- 筛选引擎 (原型已验证逻辑) ----------
@@ -83,6 +95,8 @@ const filtered = computed(() => {
     if (F.mkt !== "all" && p.market !== F.mkt) return false;
     if (F.plat !== "全部" && p.platform !== F.plat) return false;
     if (F.scene !== "全部" && (p.demand_id ?? "none") !== F.scene) return false;
+    if (F.pri !== "全部" && tierOf(scoreOf(p)) !== F.pri) return false;
+    if (F.days > 0 && HRS(p) > F.days * 24) return false;
     if (F.q && !`${p.summary}${p.content}${p.quote}`.toLowerCase().includes(F.q.toLowerCase())) return false;
     if (F.tab === "open") return p.state === "open";
     if (F.tab === "claimed") return p.state === "claimed";
@@ -96,10 +110,14 @@ const filtered = computed(() => {
   else arr = [...arr].sort((a, b) => scoreOf(b) - scoreOf(a));
   return arr;
 });
-const live = computed(() => filtered.value.filter((p) => !p.stale));
-const staled = computed(() => filtered.value.filter((p) => p.stale));
-const visible = computed(() => (staleOpen.value ? [...live.value, ...staled.value] : live.value));
+// v4: 全量展示, 不再折叠冷却帖
+const visible = computed(() => filtered.value);
 const sel = computed(() => posts.value.find((p) => p.id === selId.value));
+
+/** 优先级档位: P0 ≥70, P1 ≥40, P2 <40 */
+function tierOf(score) { return score >= 70 ? "P0" : score >= 40 ? "P1" : "P2"; }
+function priOf(p) { return tierOf(scoreOf(p)); }
+const MKT_SHORT = { cn: "中", en: "英", jp: "日", kr: "韩" };
 
 function stateBadge(p) {
   if (p.state === "replied") return { cls: "st-done", txt: "已回复" };
@@ -133,6 +151,7 @@ async function act(path, body, okMsg) {
     const i = posts.value.findIndex((p) => p.id === selId.value);
     if (i >= 0) posts.value[i] = { ...posts.value[i], ...j.post };
     if (okMsg) t(okMsg);
+    refreshStats(); // v4: 状态变化后 P0/待处理计数实时更新
     return true;
   } catch (e) { t(e.message, true); return false; }
 }
@@ -144,19 +163,36 @@ async function claimDraft() {
     if (i >= 0) posts.value[i] = { ...posts.value[i], ...j.post };
     draft.value = j.post.reply_draft ?? "";
     t("已认领并生成 AI 草稿——直接在右侧改稿去掉 AI 腔");
+    refreshStats();
     nextTickFocus();
   } catch (e) { t(e.message, true); }
 }
 async function saveDraft() {
   const p = sel.value;
-  await act("draft", { draft: draft.value }, "草稿已保存，品牌检查已更新");
+  await act("draft", { draft: draft.value, reply_draft_cn: p?.reply_draft_cn ?? null }, "草稿已保存，品牌检查已更新");
 }
-async function markReplied() {
+function markReplied() {
   const p = sel.value;
+  if (p.state === "replied") return editReplyUrl(); // 已回复帖按 R = 修改链接
   const must = mustIssues(p);
   if (must.length) return t(`草稿有必须修改的问题：${must.map((m) => m.label || m.rule).join("、")}。改完才能标记已回复。`, true);
-  const ok = await act("replied", {}, "");
-  if (ok) t("已标记回复。系统将在 +24h/72h/7d 三轮追踪回复效果");
+  replyUrl.value = "";
+  replyUrlModal.value = true;
+}
+function editReplyUrl() {
+  replyUrl.value = sel.value?.reply_url ?? "";
+  replyUrlModal.value = true;
+}
+async function confirmReplyUrlModal() {
+  const url = replyUrl.value.trim();
+  if (!/^https?:\/\//.test(url)) return t("请粘贴你发出的回复链接（http(s):// 开头）", true);
+  replyUrlModal.value = false;
+  if (sel.value?.state === "replied") {
+    await act("reply-url", { reply_url: url }, "回复链接已更新");
+  } else {
+    const ok = await act("replied", { reply_url: url }, "已登记回复链接并标记已回复");
+    if (ok) t("详情里可点击查看或修改回复链接");
+  }
 }
 async function doReview(approve) {
   const ok = await act("review", { approve }, approve ? "母语审核通过" : "已驳回");
@@ -168,7 +204,7 @@ async function skipConfirm() {
   await act("skip", { reason }, `已跳过（${reason}）`);
 }
 async function release() {
-  await act("release", {}, "已释放回待处理池");
+  await act("release", {}, "已放回待处理池，其他同事可以认领");
 }
 function copyDraft() {
   navigator.clipboard?.writeText(draft.value).catch(() => {});
@@ -205,6 +241,10 @@ function onKey(e) {
 const TABS = [["open", "待处理"], ["mine", "我认领的"], ["claimed", "处理中"], ["review", "待我审核"], ["replied", "已回复"], ["skipped", "已跳过"], ["all", "全部"]];
 const statTab = { open: "open", new: "all", mine: "mine", review: "review", replied: "replied", week: "replied" };
 function statClick(f) { F.tab = statTab[f] ?? "all"; }
+function priClick(m) { F.mkt = m; F.pri = "P0"; F.tab = "all"; } // v4: 点 P0 数字 → 该市场仅看 P0
+function priTotal(tier) {
+  return ["cn", "en", "jp", "kr"].reduce((s, m) => s + (stats.priority?.[m]?.[tier] ?? 0), 0);
+}
 const SCENES = ["全部", "D01", "D02", "D03", "D05", "D07", "D09", "D12", "none"];
 const PLATS = ["全部", "weibo", "xiaohongshu", "douyin", "zhihu", "bilibili", "reddit", "x", "youtube", "hatena", "niconico"];
 const PLAT_LABEL = { 全部: "平台：全部", weibo: "微博", xiaohongshu: "小红书", douyin: "抖音", zhihu: "知乎", bilibili: "B站", reddit: "Reddit", x: "X", youtube: "YouTube", hatena: "はてな", niconico: "niconico" };
@@ -256,6 +296,12 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
     <button class="stat" :class="{ active: F.tab === 'review' }" @click="statClick('review')"><b>{{ stats.review }}</b>待我审核</button>
     <button class="stat" :class="{ active: F.tab === 'replied' }" @click="statClick('replied')"><b>{{ stats.today_replied }}</b>今日已回复</button>
     <button class="stat" @click="statClick('week')"><b>{{ stats.week_replied }}</b>本周我回复</button>
+    <button class="stat p0" :class="{ active: F.pri === 'P0' }" @click="F.pri === 'P0' ? (F.pri = '全部') : priClick('all')" title="P0=优先级≥70 的未完成帖（认领未回复也算）；回复/跳过后条数自动减少">
+      <b>{{ priTotal("p0") }}</b>P0 待回
+      <span class="p0mkt">
+        <a v-for="m in ['jp', 'en', 'cn', 'kr']" :key="m" href="#" @click.prevent="priClick(m)" title="只看该市场 P0">{{ MKT_SHORT[m] }} {{ stats.priority?.[m]?.p0 ?? 0 }}</a>
+      </span>
+    </button>
     <span class="health" v-if="health">
       <span>最近一轮 <b>{{ health.last_round_at ? new Date(health.last_round_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "—" }}</b></span>
       <span>今日抓 <b>{{ health.today_fetched }}</b> / 入库 <b>{{ health.today_demand }}</b></span>
@@ -276,7 +322,8 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
     <div class="fsep"></div>
     <select v-model="F.scene"><option v-for="s in SCENES" :key="s" :value="s">{{ s === "全部" ? "场景：全部" : s === "none" ? "未归类" : s }}</option></select>
     <select v-model="F.plat"><option v-for="p in PLATS" :key="p" :value="p">{{ PLAT_LABEL[p] }}</option></select>
-    <select v-model="F.days"><option :value="3">近 72 小时</option><option :value="1">近 24 小时</option><option :value="7">近 7 天</option><option :value="14">近 14 天</option><option :value="90">近 90 天</option></select>
+    <select v-model="F.pri"><option value="全部">优先级：全部</option><option value="P0">P0（≥70）</option><option value="P1">P1（40-69）</option><option value="P2">P2（&lt;40）</option></select>
+    <select v-model="F.days"><option :value="0">时间：全部</option><option :value="1">近 24 小时</option><option :value="3">近 72 小时</option><option :value="7">近 7 天</option><option :value="14">近 14 天</option><option :value="90">近 90 天</option></select>
     <input v-model="F.q" class="search" placeholder="搜索…" />
     <div class="sort">排序：
       <button :class="{ on: F.sort === 'score' }" @click="F.sort = 'score'">优先级</button>
@@ -287,37 +334,29 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
 
   <div class="main">
     <div class="left">
-      <div v-if="!live.length && !staled.length" style="background: var(--panel); border: 1px dashed var(--line-2); border-radius: 12px; padding: 28px; text-align: center; color: var(--ink-3); font-size: 13px">
+      <div v-if="!visible.length" style="background: var(--panel); border: 1px dashed var(--line-2); border-radius: 12px; padding: 28px; text-align: center; color: var(--ink-3); font-size: 13px">
         当前筛选无帖子。管道扫描中：最近一轮 {{ health?.last_round_at ? new Date(health.last_round_at).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" }) : "—" }}，今日已抓 {{ health?.today_fetched ?? 0 }} 条。<br />试试切换市场或场景，或点「全部」重置。
       </div>
 
-      <div v-for="p in live" :key="p.id" class="card" :class="{ sel: p.id === selId }" @click="select(p)">
+      <div v-for="p in visible" :key="p.id" class="card" :class="{ sel: p.id === selId }" @click="select(p)">
         <div class="meta">
+          <span class="pritag" :class="priOf(p).toLowerCase()" :title="'优先级 ' + scoreOf(p) + '（P0≥70 · P1≥40 · P2<40）'">{{ priOf(p) }} {{ scoreOf(p) }}</span>
           <span class="mkt" :style="{ background: MKT_STYLE[p.market][0], color: MKT_STYLE[p.market][1] }">{{ MKT_LABEL[p.market] }}</span>
           <span class="plat">{{ { weibo: "微博", xiaohongshu: "小红书", douyin: "抖音", zhihu: "知乎", bilibili: "B站", reddit: "Reddit", x: "X", youtube: "YouTube", hatena: "はてな", niconico: "niconico" }[p.platform] ?? p.platform }}</span>
+          <span v-if="p.stale" class="stalechip" title="发布超过 72 小时">久</span>
           <span class="fdot" :style="{ background: fdot(p) }"></span><span class="age">{{ ageTxt(p) }}</span>
           <span class="eng">赞 {{ p.metrics_json?.likes ?? 0 }} · 评 {{ p.metrics_json?.comments ?? 0 }}</span>
           <span v-if="p.kol_tier === 'kol'" class="kol" style="cursor:pointer" title="点击查看建联卡片" @click.stop="select(p); openOutreach(p)">KOL</span>
           <span v-else-if="p.kol_tier === 'koc'" class="kol koc" style="cursor:pointer" title="点击查看建联卡片" @click.stop="select(p); openOutreach(p)">KOC</span>
-          <span class="state" :class="stateBadge(p).cls">{{ stateBadge(p).txt }}</span>
+          <span class="state" :class="stateBadge(p).cls">{{ stateBadge(p).txt }}<template v-if="p.state === 'replied' && p.reply_url">🔗</template></span>
         </div>
         <div class="sum">{{ p.summary || p.title }}</div>
-        <div class="quote" :class="{ unv: !p.quote_verified }">"{{ p.quote }}"<span class="vq">{{ p.quote_verified ? "✓ 已核验" : "引句未核验" }}</span></div>
+        <div class="quote" v-if="p.quote" :class="{ unv: !p.quote_verified }">"{{ p.quote }}"<span class="vq">{{ p.quote_verified ? "✓ 已核验" : "引句未核验" }}</span></div>
         <div class="prev">{{ p.content }}</div>
         <div class="chips">
           <span v-if="p.demand_id" class="chip">{{ p.demand_id }}</span>
           <span class="chip topic" v-if="p.topic">{{ p.topic }}</span>
           <span class="chip rel" v-if="p.state === 'replied'">已回复</span>
-        </div>
-      </div>
-
-      <div v-if="staled.length" class="stalehead" @click="staleOpen = !staleOpen">
-        {{ staleOpen ? "▾" : "▸" }} 已冷却 {{ staled.length }} 条（发布超过 72h，回复价值低）
-      </div>
-      <div class="stalebox" :class="{ open: staleOpen }">
-        <div v-for="p in staled" :key="p.id" class="card staled" :class="{ sel: p.id === selId }" @click="select(p)">
-          <div class="meta"><span class="mkt" :style="{ background: MKT_STYLE[p.market][0], color: MKT_STYLE[p.market][1] }">{{ MKT_LABEL[p.market] }}</span><span class="plat">{{ p.platform }}</span><span class="age">{{ ageTxt(p) }}</span><span class="state" :class="stateBadge(p).cls">{{ stateBadge(p).txt }}</span></div>
-          <div class="sum">{{ p.summary || p.title }}</div>
         </div>
       </div>
     </div>
@@ -374,6 +413,10 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
         <textarea v-model="draft" class="draft" rows="5" :placeholder="sel.suitable_note ? 'AI 判断不适合回复：' + sel.suitable_note + '。如确认要回复请手动撰写。' : '按 Enter 认领并起草，或直接点击左侧卡片上的操作'"></textarea>
         <div class="draftbar"><span>运营 {{ auth.member?.name }} · 保存后自动品牌检查</span><span class="regen" @click="claimDraft()">重新起草</span></div>
       </div>
+      <div v-if="draft && sel.market !== 'cn'" class="cncard">
+        <div class="cnhead">中文对照（给不懂{{ { jp: "日语", kr: "韩语", en: "英语" }[sel.market] ?? "外语" }}的同事看，以回复原文为准）</div>
+        <div class="cnbody">{{ sel.reply_draft_cn || "（暂无翻译——保存后可手动补，或点重新起草）" }}</div>
+      </div>
       <h4>品牌检查</h4>
       <div class="bcheck" :class="mustIssues(sel).length ? 'bad' : (sel.brand_issues?.length ? 'warn' : 'ok')">
         <span class="bk">{{ mustIssues(sel).length ? "必须修改" : (sel.brand_issues?.length ? "通过，有提醒" : "通过") }}：</span>
@@ -382,13 +425,17 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
         </template>
         <template v-else>草稿无品牌风险问题</template>
       </div>
+      <div v-if="sel.state === 'replied'" class="replyurl">
+        <h4 style="margin:12px 0 6px">已登记回复链接</h4>
+        <a :href="sel.reply_url" target="_blank" rel="noopener" class="rulink">{{ sel.reply_url || "（未登记——点「修改回复链接」补填）" }}</a>
+      </div>
       <div class="acts">
         <button class="btn pri" @click="copyDraft()">复制并去原帖</button>
         <button class="btn" @click="saveDraft()">保存草稿</button>
-        <button class="btn" @click="markReplied()">标记已回复</button>
+        <button class="btn" @click="markReplied()">{{ sel.state === "replied" ? "修改回复链接" : "标记已回复" }}</button>
         <button class="btn" v-if="['jp','kr'].includes(sel.market) && sel.state === 'claimed' && sel.reply_draft && !sel.ja_reviewed_at" @click="doReview(true)">审核通过 A</button>
-        <button class="btn" @click="skipModal = true">跳过 S</button>
-        <button class="btn" v-if="sel.state === 'claimed'" @click="release()">释放</button>
+        <button class="btn" v-if="sel.state !== 'replied'" @click="skipModal = true">跳过 S</button>
+        <button class="btn" v-if="['claimed', 'skipped'].includes(sel.state)" @click="release()">放回</button>
       </div>
       <div class="kbdhint">认领后别人就不能抢这条了 · 发完贴回来按 <b>R</b> 标记已回复 · <b>?</b> 看全部快捷键</div>
     </div>
@@ -397,6 +444,19 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
   <div class="kbar">
     <span><b>J / K</b>上下移动</span><span><b>Enter</b>认领并起草</span><span><b>O</b>打开原帖</span>
     <span><b>⌘C</b>复制草稿</span><span><b>R</b>标记已回复</span><span><b>S</b>跳过</span><span><b>?</b>全部快捷键</span>
+  </div>
+
+  <div v-if="replyUrlModal" class="overlay"></div>
+  <div v-if="replyUrlModal" class="modal">
+    <h3>{{ sel?.state === "replied" ? "修改回复链接" : "登记回复链接" }}</h3>
+    <p style="font-size:12px;color:var(--ink-3);margin:4px 0 10px">
+      粘贴你在原帖发出的那条回复的 URL（评论直达链接）。用于追溯和后续效果追踪，标记已回复时必填。
+    </p>
+    <input v-model="replyUrl" class="rurl-input" placeholder="https://…" @keydown.enter="confirmReplyUrlModal()" />
+    <div style="margin-top:12px;text-align:right">
+      <button class="btn pri" @click="confirmReplyUrlModal()">{{ sel?.state === "replied" ? "保存" : "登记并标记已回复" }}</button>
+      <button class="btn" @click="replyUrlModal = false">取消</button>
+    </div>
   </div>
 
   <div v-if="skipModal" class="overlay"></div>

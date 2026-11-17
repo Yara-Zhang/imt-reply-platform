@@ -179,3 +179,22 @@ textarea.draft{width:100%;border:none;outline:none;resize:vertical;font-size:13p
   .right{width:100%;position:static;max-height:none}
   .kbar{display:none}
 }
+
+/* v4: 优先级徽章 / P0 统计 / 中文对照 / 回复链接 */
+.pritag{display:inline-flex;align-items:center;border-radius:7px;padding:1px 8px;font-size:11px;font-weight:600;font-variant-numeric:tabular-nums;white-space:nowrap}
+.pritag.p0{background:#F7E5E3;color:var(--bad)}
+.pritag.p1{background:#F5EBDD;color:#854F0B}
+.pritag.p2{background:#EEEFF2;color:var(--ink-3)}
+.stalechip{background:#EEEFF2;color:var(--ink-3);border-radius:6px;padding:0 6px;font-size:11px;line-height:18px}
+.stat.p0{flex-direction:column;align-items:flex-start;gap:1px}
+.stat.p0 b{color:var(--bad)}
+.p0mkt{display:inline-flex;gap:8px;font-size:11px;color:var(--ink-3)}
+.p0mkt a{color:var(--ink-2);padding:0 2px;border-radius:4px}
+.p0mkt a:hover{background:#E9EBEF;color:var(--bad)}
+.cncard{margin-top:8px;border:1px dashed var(--line-2);border-radius:10px;background:#FAFBFC;padding:9px 12px}
+.cncard .cnhead{font-size:11px;color:var(--ink-3);margin-bottom:4px}
+.cncard .cnbody{font-size:13px;color:var(--ink-2);white-space:pre-wrap}
+.rurl-input{width:100%;padding:8px 10px;border:1px solid var(--line-2);border-radius:8px;font-size:13px}
+.rurl-input:focus{outline:2px solid var(--brand);outline-offset:-1px}
+.rulink{color:var(--brand);word-break:break-all;font-size:13px}
+.rulink:hover{text-decoration:underline}

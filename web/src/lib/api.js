@@ -95,11 +95,17 @@ async function mock(path, opts = {}) {
   }
   if (route === "stats") {
     const me = hasToken() ? JSON.parse(localStorage.getItem("imt_member") ?? "{}") : {};
+    const tier = (s) => (s >= 70 ? "p0" : s >= 40 ? "p1" : "p2");
+    const priority = { cn: { p0: 0, p1: 0, p2: 0 }, en: { p0: 0, p1: 0, p2: 0 }, jp: { p0: 0, p1: 0, p2: 0 }, kr: { p0: 0, p1: 0, p2: 0 } };
+    for (const p of db) {
+      if (p.state === "open" || p.state === "claimed") (priority[p.market] ??= { p0: 0, p1: 0, p2: 0 })[tier(p.priority_score ?? 0)]++;
+    }
     return {
-      open: db.filter((p) => p.state === "open" && !p.stale).length,
+      open: db.filter((p) => p.state === "open").length,
       today_new: 12, mine: db.filter((p) => p.state === "claimed" && p.claimed_by_name === me.name).length,
       review: db.filter((p) => p.market === "kr" || p.market === "jp").filter((p) => p.state === "claimed" && p.reply_draft && !p.ja_reviewed_at).length,
       today_replied: 5, week_replied: 18,
+      priority,
     };
   }
   if (route === "health") {
@@ -162,7 +168,17 @@ async function mock(path, opts = {}) {
     if ((p.market === "jp" || p.market === "kr") && p.reply_draft && !p.ja_reviewed_at) {
       throw new Error("日本/韩国帖需母语审核人通过后才能标记已回复——找本周日审：@李四");
     }
-    p.state = "replied"; p.replied_at = new Date().toISOString();
+    if (!body.reply_url || !/^https?:\/\//.test(String(body.reply_url))) {
+      throw new Error("请登记回复链接（粘贴你发出的回复的 URL）");
+    }
+    p.state = "replied"; p.replied_at = new Date().toISOString(); p.reply_url = body.reply_url;
+    saveDb(db); return { post: p };
+  }
+  if (route === "posts" && action === "reply-url") {
+    const p = db.find((x) => x.id === body.id);
+    if (p.state !== "replied") throw new Error("只有已回复的帖子才能修改回复链接");
+    if (!body.reply_url || !/^https?:\/\//.test(String(body.reply_url))) throw new Error("回复链接格式不对");
+    p.reply_url = body.reply_url;
     saveDb(db); return { post: p };
   }
   if (route === "posts" && action === "review") {
@@ -178,7 +194,7 @@ async function mock(path, opts = {}) {
   }
   if (route === "posts" && action === "release") {
     const p = db.find((x) => x.id === body.id);
-    p.state = "open"; p.claimed_by_name = null; p.claimed_at = null;
+    p.state = "open"; p.claimed_by_name = null; p.claimed_at = null; p.skip_reason = null;
     saveDb(db); return { post: p };
   }
   if (route === "reply") { // 认领并起草 (mock: 生成一段示例草稿)
@@ -191,6 +207,7 @@ async function mock(path, opts = {}) {
     p.reply_draft = en
       ? "Totally relatable — Prime's subtitle options can be so random. If it helps, I use Immersive Translate's bilingual subtitle feature to watch stuff like this, it overlays subtitles right on the video: https://immersivetranslate.com/"
       : "太懂了，这种没有字幕的真的着急。可以试试沉浸式翻译的视频双语字幕，直接在视频上叠加双语字幕，不用来回下载字幕文件～";
+    p.reply_draft_cn = en ? "太懂了，Prime 的字幕选项真是随缘。如果你需要，我用沉浸式翻译的双语字幕功能看这类内容，直接在视频上叠加字幕。" : null;
     p.brand_issues = [];
     p.draft_at = new Date().toISOString();
     saveDb(db); return { post: p };

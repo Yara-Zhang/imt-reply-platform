@@ -448,6 +448,7 @@ Deno.serve(async (req) => {
             summary: (r.demandSummary ?? "").slice(0, 300), quote: (r.demandQuote ?? "").slice(0, 60),
             quote_verified: verifyQuote(r.demandQuote, fullText), topic: r.demandTopic ?? null,
             lang: null, confidence: r.relevance ?? null,
+            metrics_json: { likes: n.likes, comments: n.comments },
             kol_tier: kolTier,
             priority_score: priorityScore({ likes: n.likes, comments: n.comments, publishedAt: n.publishedIso, isKol: kolTier === "kol", highEngAuthor: false, sameTopicCount: 0 }),
             stale: isStale(n.publishedIso), state: "open",

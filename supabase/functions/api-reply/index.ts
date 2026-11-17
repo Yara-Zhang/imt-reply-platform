@@ -62,6 +62,7 @@ Deno.serve(async (req) => {
   const system = draftSystemPrompt(
     brand.name_cn ?? "沉浸式翻译", brand.name_en ?? "Immersive Translate", LANG_NAME[lang],
     scene?.feature ?? "双语对照翻译", scene?.capability ?? ["双语对照翻译"], brand.site ?? "https://immersivetranslate.com/",
+    post.platform,
   );
   const user = draftUserPrompt({
     platform: post.platform,
@@ -73,13 +74,14 @@ Deno.serve(async (req) => {
   });
 
   // 起草 (高质量模型)
-  let draft = "", suitableNote = "";
+  let draft = "", draftCn = "", suitableNote = "";
   try {
-    const result = await deepSeekJson<{ suitable: boolean; reason: string; reply: string }>(system, user, false);
+    const result = await deepSeekJson<{ suitable: boolean; reason: string; reply: string; translation_cn?: string }>(system, user, false);
     if (!result.suitable) {
       suitableNote = result.reason ?? "AI 判断不适合回复";
     } else {
       draft = (result.reply ?? "").slice(0, 4000);
+      draftCn = (result.translation_cn ?? "").slice(0, 4000);
     }
   } catch (e) {
     return json({ error: `AI 起草失败: ${(e as Error).message}` }, 502);
@@ -89,7 +91,7 @@ Deno.serve(async (req) => {
     : ([{ level: "must", rule: "ai_unsuitable", label: `AI 判断不适合回复——${suitableNote}。如确认要回复，请手动撰写，或直接跳过这条。` }] as never[]);
 
   const { data: updated } = await client.from("demand_posts").update({
-    reply_draft: draft, draft_at: new Date().toISOString(),
+    reply_draft: draft, reply_draft_cn: draftCn || null, draft_at: new Date().toISOString(),
     brand_issues: issues, suitable_note: suitableNote || null,
     // 重新起草清空母语审核 (v2 规则)
     ja_reviewed_by: null, ja_reviewed_at: null,
