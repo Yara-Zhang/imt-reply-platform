@@ -10,8 +10,22 @@ const LS = {
 export function setToken(t) { LS.token = t; }
 export function hasToken() { return !!LS.token; }
 
+// 真实模式路径映射: 业务代码用短路径(/auth /posts /scenes /reply /stats /health),
+// Supabase Edge Function 按函数名分发, 必须补上函数名前缀; Mock 引擎仍按短路径匹配, 不受影响
+const PREFIX_MAP = [
+  [/^\/auth\//, "/api-auth/"],
+  [/^\/scenes\//, "/api-scenes/"],
+  [/^\/reply\/?$/, "/api-reply/reply"],
+  [/^\/posts\//, "/api-posts/"],
+  [/^\/(stats|health)\b/, "/api-posts/$1"],
+];
+function realPath(path) {
+  for (const [re, to] of PREFIX_MAP) { const s = path.replace(re, to); if (s !== path) return s; }
+  return path;
+}
+
 async function real(path, opts = {}) {
-  const r = await fetch(`${BASE}${path}`, {
+  const r = await fetch(`${BASE}${realPath(path)}`, {
     ...opts,
     headers: { "Content-Type": "application/json", Authorization: `Bearer ${LS.token}`, ...(opts.headers ?? {}) },
     body: opts.body && typeof opts.body !== "string" ? JSON.stringify(opts.body) : opts.body,
