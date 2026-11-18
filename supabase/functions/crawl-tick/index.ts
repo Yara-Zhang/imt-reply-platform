@@ -2,6 +2,7 @@
 // 触发: pg_cron 通过 pg_net 调用本 function (v1 模式, DEPLOY.md 有配置步骤)
 import { env, json, sb } from "../_shared/glue.ts";
 import { deepSeekJson } from "../_shared/glue.ts";
+import { tikhubProfile } from "../_shared/profile.ts";
 import { demandGate, hashUrl, marketOf, verifyQuote } from "../_shared/logic/gates.ts";
 import { priorityScore, isStale } from "../_shared/logic/priority.ts";
 import { screenSystemPrompt, screenUserPrompt } from "../_shared/logic/prompts.ts";
@@ -39,16 +40,17 @@ async function classifyAuthor(c: { platform: string; authorId: string; authorNam
   let followers: number | null = (cur.followers as number | null) ?? null;
   let bio: string | null = (cur.bio as string | null) ?? null;
 
-  // ---- 成本闸门: 互动达标且档案过期 → 拉档案 (含 bio 邮箱提取) ----
+  // ---- 成本闸门: 互动达标且档案过期 → 拉档案 (含 bio 邮箱提取; 多平台, 见 _shared/profile.ts) ----
   if (shouldFetchProfile({ engagement, profileFetchedAt: (cur.profile_fetched_at as string | null) ?? null }, rules)) {
     try {
-      const profile = await tikhubProfile(c.platform, c.authorId);
+      const profile = await tikhubProfile(c.platform, c.authorId, c.authorName);
       if (profile) {
         followers = profile.followers ?? followers;
         bio = profile.bio ?? bio;
         const { email, source } = extractEmail(bio);
         const { data: upd } = await client.from("authors").update({
           followers, bio,
+          author_id: profile.resolvedId ?? c.authorId, // 微博 search 中转后的真实 uid
           email: email ?? (cur.email as string | null),
           email_source: source ? `bio:${c.platform}` : (cur.email_source as string | null),
           profile_fetched_at: new Date().toISOString(),
@@ -77,26 +79,6 @@ async function classifyAuthor(c: { platform: string; authorId: string; authorNam
   }).eq("id", cur.id as string);
 
   return tier;
-}
-
-/** TikHub 用户详情 (followers + bio); P0 支持 X, 其他平台返回 null (端点按 OpenAPI 校准) */
-async function tikhubProfile(platform: string, authorId: string): Promise<{ followers: number | null; bio: string | null } | null> {
-  const paths: Record<string, string> = {
-    x: "/api/v1/twitter/web/fetch_user_profile?screen_name=" + encodeURIComponent(authorId),
-    // 其他平台端点在 P1 按需补充
-  };
-  const path = paths[platform];
-  if (!path || !env.tikhubKey) return null;
-  const r = await fetch(`https://api.tikhub.io${path}`, {
-    headers: { Authorization: `Bearer ${env.tikhubKey}`, "User-Agent": TIKHUB_UA },
-  });
-  if (!r.ok) throw new Error(`TikHub profile ${platform} ${r.status}`);
-  const j = await r.json();
-  const d = j?.data ?? {};
-  return {
-    followers: Number(d.followers_count ?? d.followers ?? d.follower_count) || null,
-    bio: String(d.description ?? d.bio ?? "") || null,
-  };
 }
 
 // ---------- TikHub 适配层 (2026-11-17 按 OpenAPI 实测校准: 端点带 /api/v1/ 前缀, 多为 GET+query) ----------
@@ -197,7 +179,7 @@ async function tikhubSearch(platform: string, keyword: string, market: string): 
           url: `https://x.com/${sn}/status/${S(t.tweet_id)}`,
           title: "", content: S(t.text), publishedIso: iso,
           likes: num(t.favorites), comments: num(t.replies),
-          authorId: S(u.rest_id) || sn, authorName: sn,
+          authorId: sn, authorName: S(u.name) || sn, // 用 screen_name 作主键: rest_id 数字串无法查用户档案 (存量bug修复)
           authorFollowers: num(u.followers_count) || undefined,
         };
       }));

@@ -118,6 +118,26 @@ Deno.serve(async (req) => {
     });
   }
 
+  // ---------- GET outcome: 单帖回复效果三轮数据 (C3, 详情区懒加载) ----------
+  if (req.method === "GET" && path === "outcome") {
+    const id = url.searchParams.get("id") ?? "";
+    if (!id) return json({ error: "缺少 id" }, 400);
+    const { data: rounds } = await client.from("reply_outcomes")
+      .select("check_round, checked_at, delta_likes, delta_comments, post_alive, note")
+      .eq("post_id", id).order("check_round");
+    return json({ rounds: rounds ?? [] });
+  }
+
+  // ---------- GET templates: 话术模板列表 (场景地图页展示, C6) ----------
+  if (req.method === "GET" && path === "templates") {
+    const { data: templates } = await client.from("reply_templates")
+      .select("id, demand_id, market, platform, content, usage_count, status, created_at")
+      .in("status", ["active", "pinned"])
+      .order("created_at", { ascending: false })
+      .limit(200);
+    return json({ templates: templates ?? [] });
+  }
+
   // ---------- GET report: 周报聚合 (平台内查看+下载, 飞书推送已移除) ----------
   // 参数 week_offset: 0=本周(周一至今), 1=上周, 2=前周…
   if (req.method === "GET" && path === "report") {
@@ -331,6 +351,22 @@ Deno.serve(async (req) => {
         await client.from("op_log").insert({ table_name: "demand_posts", row_id: id, action: body.reopen ? "reopen" : "release", operator: member.id, detail: { prev_owner: post.claimed_by } });
         const { data: updated } = await client.from("demand_posts").update(patch).eq("id", id).select("*").single();
         return json({ post: updated });
+      }
+
+      // 存为话术模板 (C6: 沉淀已验证的回复; 供 api-reply TOP3 注入)
+      case "save-template": {
+        if (post.state !== "replied") return json({ error: "只有已回复的帖子才能沉淀为模板（回复先实际发出去验证过）" }, 400);
+        const content = ((body.content as string | undefined) ?? post.reply_draft ?? "").trim();
+        if (!content) return json({ error: "这条帖子没有回复草稿可沉淀" }, 400);
+        const { data: dup } = await client.from("reply_templates").select("id").eq("source_post_id", id).maybeSingle();
+        if (dup) return json({ error: "这条帖子的回复已沉淀过模板了" }, 409);
+        const { data: tpl, error: tplErr } = await client.from("reply_templates").insert({
+          demand_id: post.demand_id ?? null, market: post.market, platform: post.platform,
+          content: content.slice(0, 2000), source_post_id: id, created_by: member.id,
+          status: "active",
+        }).select("id, demand_id, market, platform, content").single();
+        if (tplErr) return json({ error: tplErr.message }, 500);
+        return json({ template: tpl });
       }
 
       // 改归需求场景

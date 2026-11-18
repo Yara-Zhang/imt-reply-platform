@@ -1,5 +1,5 @@
 <script setup>
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, reactive, computed, onMounted, onBeforeUnmount, watch } from "vue";
 import { useRouter } from "vue-router";
 import { useAuth } from "../stores/auth.js";
 import { api, MOCK } from "../lib/api.js";
@@ -24,6 +24,15 @@ const guideStep = ref(0);
 // 建联卡片状态 (spec C2: 点徽章 → 右侧栏切换)
 const outreach = ref(null); // 建联卡数据; null = 显示帖子详情
 const outreachLoading = ref(false);
+
+// 回复效果 (C3: 选中已回复帖时懒加载三轮数据)
+const outcome = ref(null);
+watch(selId, async (id) => {
+  outcome.value = null;
+  const p = posts.value.find((x) => x.id === id);
+  if (!p || p.state !== "replied") return;
+  try { outcome.value = await api(`/posts/outcome?id=${id}`, { method: "GET" }); } catch { /* 静默 */ }
+});
 
 async function openOutreach(p) {
   if (!p.kol_tier || p.kol_tier === "none" || !p.author_id) return;
@@ -205,6 +214,12 @@ async function skipConfirm() {
 }
 async function release() {
   await act("release", {}, "已放回待处理池，其他同事可以认领");
+}
+async function saveTemplate() {
+  try {
+    const j = await api(`/posts/save-template`, { method: "POST", body: { id: selId.value } });
+    t(`已沉淀为${j.template?.demand_id ?? "通用"}场景话术模板，之后起草同场景帖会自动参考`);
+  } catch (e) { t(e.message, true); }
 }
 function copyDraft() {
   navigator.clipboard?.writeText(draft.value).catch(() => {});
@@ -428,6 +443,16 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
       <div v-if="sel.state === 'replied'" class="replyurl">
         <h4 style="margin:12px 0 6px">已登记回复链接</h4>
         <a :href="sel.reply_url" target="_blank" rel="noopener" class="rulink">{{ sel.reply_url || "（未登记——点「修改回复链接」补填）" }}</a>
+        <div v-if="outcome?.rounds?.length" class="occard">
+          <div class="cnhead">回复效果（+24h / +72h / +7d 自动回访你发出的回复）</div>
+          <div class="ocrows">
+            <span v-for="r in outcome.rounds" :key="r.check_round" class="ocrow">
+              {{ { 1: "24h", 2: "72h", 3: "7d" }[r.check_round] }}：赞 <b>{{ r.delta_likes ?? 0 }}</b> · 评 <b>{{ r.delta_comments ?? 0 }}</b>
+              <template v-if="!r.post_alive">（原帖已删）</template>
+            </span>
+          </div>
+        </div>
+        <div v-else class="occard"><div class="cnhead">回复效果：发出 24 小时后系统自动回访统计（每小时检查一次）</div></div>
       </div>
       <div class="acts">
         <button class="btn pri" @click="copyDraft()">复制并去原帖</button>
@@ -436,6 +461,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
         <button class="btn" v-if="['jp','kr'].includes(sel.market) && sel.state === 'claimed' && sel.reply_draft && !sel.ja_reviewed_at" @click="doReview(true)">审核通过 A</button>
         <button class="btn" v-if="sel.state !== 'replied'" @click="skipModal = true">跳过 S</button>
         <button class="btn" v-if="['claimed', 'skipped'].includes(sel.state)" @click="release()">放回</button>
+        <button class="btn tpl" v-if="sel.state === 'replied' && sel.reply_draft" @click="saveTemplate()">存为模板</button>
       </div>
       <div class="kbdhint">认领后别人就不能抢这条了 · 发完贴回来按 <b>R</b> 标记已回复 · <b>?</b> 看全部快捷键</div>
     </div>

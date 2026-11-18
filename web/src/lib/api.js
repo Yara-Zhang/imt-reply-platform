@@ -181,6 +181,25 @@ async function mock(path, opts = {}) {
     p.reply_url = body.reply_url;
     saveDb(db); return { post: p };
   }
+  if (route === "posts" && action === "save-template") { // C6: 沉淀已验证回复
+    const p = db.find((x) => x.id === body.id);
+    if (!p) throw new Error("帖子不存在");
+    if (p.state !== "replied") throw new Error("只有已回复的帖子才能沉淀为模板");
+    if (!p.reply_draft) throw new Error("这条帖子没有回复草稿可沉淀");
+    let tpls = JSON.parse(localStorage.getItem("imt_mock_templates") ?? "[]");
+    if (tpls.some((t) => t.source_post_id === body.id)) throw new Error("这条帖子的回复已沉淀过模板了");
+    tpls.push({ id: "t" + Date.now(), demand_id: p.demand_id ?? null, market: p.market, platform: p.platform, content: p.reply_draft, usage_count: 0, source_post_id: body.id });
+    localStorage.setItem("imt_mock_templates", JSON.stringify(tpls));
+    return { template: tpls[tpls.length - 1] };
+  }
+  if (route === "posts" && action === "templates") {
+    return { templates: JSON.parse(localStorage.getItem("imt_mock_templates") ?? "[]") };
+  }
+  if (route === "posts" && action === "outcome") { // C3: 回复效果三轮
+    const p = db.find((x) => x.id === qs.id);
+    const outs = JSON.parse(localStorage.getItem("imt_mock_outcomes") ?? "[]").filter((o) => o.post_id === qs.id);
+    return { rounds: outs.map((o) => ({ ...o, checked_at: o.checked_at, delta_likes: o.delta_likes, delta_comments: o.delta_comments, post_alive: true, note: o.note })) };
+  }
   if (route === "posts" && action === "review") {
     const p = db.find((x) => x.id === body.id);
     if (body.approve !== false) { p.ja_reviewed_at = new Date().toISOString(); }
