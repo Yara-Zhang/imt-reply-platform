@@ -18,6 +18,7 @@ const skipModal = ref(false);
 const kbdModal = ref(false);
 const replyUrlModal = ref(false);
 const replyUrl = ref("");
+const drafting = ref(false); // 起草进行中 (防连按 Enter 重复提交 + 按钮态)
 const showGuide = ref(!localStorage.getItem("imt_guide_done"));
 const guideStep = ref(0);
 
@@ -166,6 +167,9 @@ async function act(path, body, okMsg) {
 }
 
 async function claimDraft() {
+  if (drafting.value) return; // 防重复提交: 起草需 20-60 秒, 连按 Enter 会被锁拦下
+  drafting.value = true;
+  t("正在认领并起草（约 20-60 秒），期间请勿重复按 Enter");
   try {
     const j = await api("/reply", { method: "POST", body: { id: selId.value } });
     const i = posts.value.findIndex((p) => p.id === selId.value);
@@ -175,6 +179,7 @@ async function claimDraft() {
     refreshStats();
     nextTickFocus();
   } catch (e) { t(e.message, true); }
+  finally { drafting.value = false; }
 }
 async function saveDraft() {
   const p = sel.value;
@@ -425,8 +430,8 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
       <div class="verdict">置信度 {{ sel.confidence ?? "—" }} · 场景 <b>{{ sel.demand_id ?? "未归类" }}</b> · 引句<b>{{ sel.quote_verified ? "已核验" : "未核验" }}</b></div>
       <h4>回复草稿（可改写）</h4>
       <div class="draftwrap">
-        <textarea v-model="draft" class="draft" rows="5" :placeholder="sel.suitable_note ? 'AI 判断不适合回复：' + sel.suitable_note + '。如确认要回复请手动撰写。' : '按 Enter 认领并起草，或直接点击左侧卡片上的操作'"></textarea>
-        <div class="draftbar"><span>运营 {{ auth.member?.name }} · 保存后自动品牌检查</span><span class="regen" @click="claimDraft()">重新起草</span></div>
+        <textarea v-model="draft" class="draft" rows="5" :disabled="drafting" :placeholder="drafting ? 'AI 起草中，约需 20-60 秒，请勿重复按 Enter…' : (sel.suitable_note ? 'AI 判断不适合回复：' + sel.suitable_note + '。如确认要回复请手动撰写。' : '按 Enter 认领并起草，或直接点击左侧卡片上的操作')"></textarea>
+        <div class="draftbar"><span>{{ drafting ? "⏳ AI 起草中（DeepSeek 推理需 20-60 秒）…" : "运营 " + (auth.member?.name ?? "") + " · 保存后自动品牌检查" }}</span><span class="regen" :class="{ disabled: drafting }" @click="claimDraft()">{{ drafting ? "起草中…" : "重新起草" }}</span></div>
       </div>
       <div v-if="draft && sel.market !== 'cn'" class="cncard">
         <div class="cnhead">中文对照（给不懂{{ { jp: "日语", kr: "韩语", en: "英语" }[sel.market] ?? "外语" }}的同事看，以回复原文为准）</div>

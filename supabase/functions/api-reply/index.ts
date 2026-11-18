@@ -38,7 +38,14 @@ Deno.serve(async (req) => {
     const { count } = await client.from("demand_posts")
       .update({ state: "claimed", claimed_by: member.id, claimed_at: new Date().toISOString() })
       .eq("id", id).eq("state", "open").select("id", { count: "exact", head: true });
-    if (!count) return json({ error: "认领冲突: 已被他人抢先" }, 409);
+    if (!count) {
+      // 二次确认: 被谁抢先? 是本人并发请求 (双击 Enter) 则继续起草; 真是他人则 409
+      const { data: fresh } = await client.from("demand_posts").select("claimed_by, state").eq("id", id).single();
+      if (fresh?.claimed_by !== member.id) {
+        return json({ error: "认领冲突: 已被他人抢先" }, 409);
+      }
+      // 自己先前请求已认领 → 落到下方正常起草
+    }
   }
 
   // 场景与品牌信息
